@@ -7,7 +7,6 @@
 ## 在线访问
 
 - GitHub Pages：<https://guitarmancoder.github.io/microbial_atlas/>
-- 照片存储：Supabase Storage（公开 bucket）
 
 ## 功能
 
