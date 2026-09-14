@@ -8,6 +8,11 @@
 
 - GitHub Pages：<https://guitarmancoder.github.io/microbial_atlas/>
 
+<img width="2328" height="1026" alt="image" src="https://github.com/user-attachments/assets/3b8c977d-a971-4b7c-8a8f-07036cb49a35" />
+
+<img width="1832" height="1236" alt="image" src="https://github.com/user-attachments/assets/0940d81e-074b-4474-9dfd-881a987d4c2d" />
+
+
 ## 功能
 
 - 生长热图：生长 🟢 / 弱生长 🟡 / 不生长 🔴 / 未实验 ⚪，点击查看菌落照片大图
