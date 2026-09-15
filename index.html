@@ -1,5 +1,41 @@
 <!DOCTYPE html>
-
+<!-- 云端协作版 v36（基于 云端协作版-v35.html）· v37 修订：状态改动「定下来」
+     v36 = 修「0_0 改为未实验后仍显示红色」：给已清空的格子登记墓碑（wipedCells），
+           让「清空」这个动作也能同步出去，云端那行被改写成空壳。
+     v37 = 用户二次报告「改完过一会又变回红色」，查明真正的病根是**通用缺陷**：
+           ① 选「未实验」时原代码把状态覆盖整个删掉 → getEffective() 回落到内建状态，
+              而绝大多数格子的内建状态是彩色 → 点完灰立刻又变红（不止 0_0，每一格都如此）；
+           ② 删干净后该格从推送名单里消失 → 云端旧记录永远清不掉；
+           ③ 本机改动 900ms 后才推送，期间任何一次同步都会用云端旧行冲掉它。
+           修法：未实验改为**显式覆盖**；新增 per-cell 改动时刻表 cellTouched
+           （云端行更旧就不采纳，推送成功即解除）；硬性清空名单收窄为只拦旧行。
+           结论：任何状态改动一经确认就定住，其他电脑与游客看到的都是同一个结果。
+     v35（基于 云端协作版-v34.html）· Supabase 双向同步：云端为准 + 本地缓存
+     v31 = 只上行；v32 = 上行 + 下行（读回并合并）；v33 = 钉住内置账号角色 + 照片下架黑名单。
+     v34 = 让「会员在任意电脑提交 → 任意电脑的管理员都能审核」与
+           「lowafl_33 在任何电脑上登录都是超级管理员」两条需求真正成立：
+           ① 角色变更同步到云端（原先前端只写本机 users，云端 profiles 永远滞后）
+              → 新增 pushRoleChange()，挂在「设为管理员 / 降为普通会员 / 管理员申请通过」三处；
+              → 新增 rolePending 标记：云端确认前，本机角色不被云端旧值覆盖，
+                并在每次同步时自动重推（解决「刚设为管理员，30 秒后又变回普通会员」）。
+           ② 注销 / 删除账号改为先在云端写 status=deleted 再删本机记录
+              （pushProfile 现在也写 status 字段），否则别的电脑会把已注销账号「复活」。
+           ③ 超管档案自愈：任何电脑上登录，只要云端 profiles 缺 role=superadmin 那行就补回去。
+           ④ 本机过了密码、云端却登录失败时不再静默 —— 明确提示「云端会话未建立」。
+           ⑤ 离线提交（没拿到云端 id）在云端审核完后，本机的 ⏳ 待审核条目会被清掉。
+     v35 = 「注销要彻底」+「审核结果要通知到人」：
+           ① by 字段修正：提交代码原先写 me.username，而 users 记录里没有该字段
+              （记录键即用户名）→ by 恒为 null。连带导致「注销时撤回其待审核提交」
+              失效、用户管理面板「已通过提交 N 条」恒为 0。现改为 session.username。
+           ② 注销 / 删除传播：mergeCloudProfiles 遇到云端 status=deleted 的行，
+              原先只跳过、不清理本机副本 → 从云端拉过名单的电脑会永远显示该账号。
+              现在改为「云端说删了就一并从本机删掉」（内置超管 / admin 除外），
+              并拒绝让已注销的档案再走云端兜底登录（否则原电脑上会「复活」）。
+           ③ 审核结果通知：以云端 atlas_submissions 为数据源（审核结果天然跨电脑），
+              按「提交人 = 我」在本机生成通知 —— 导航条 🔔 徽标（未读计数）+
+              通知面板 + 新结果弹提示。通知按用户名隔离，同一浏览器换账号不串。
+     表结构未变：supabase_v31/v32 建库脚本无需重跑；
+     但需执行（或重跑一次）「加固profiles策略.sql」—— v34 的自愈依赖其中的 is_superadmin()。-->
 
 <html lang="zh-CN">
 <head>
@@ -486,7 +522,7 @@
     点击<span style="color:#27ae60;font-weight:600">绿色</span>或<span style="color:#d4ac0d;font-weight:600">黄色</span>圆圈可弹出对应的平板照片。"成片"表示菌落密集融合；少量/弱生长以黄色圆圈标注。
   </p>
   <div class="footer-sep" aria-hidden="true"></div>
-  <p class="footer">Made with 🔬 &amp; 💻 · by 热爱微生物与代码的王欣 <span style="margin:0 8px;opacity:.45;">|</span> 📧 <a href="mailto:lowafl_33@126.com" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(0,0,0,.25);">lowafl_33@126.com</a> <span style="margin:0 8px;opacity:.45;">|</span> 👁 浏览量：<span id="viewCount">--</span></p>
+  <p class="footer">Made with 🔬 &amp; 💻 · by 热爱微生物与代码的王欣 <span style="margin:0 8px;opacity:.45;">|</span> 📧 <a href="mailto:lowafl_33@126.com" style="color:inherit;text-decoration:none;border-bottom:1px dashed rgba(0,0,0,.25);">lowafl_33@126.com</a> <span style="margin:0 8px;opacity:.45;">|</span> 👁 浏览量：<span id="viewCount">--</span> <span style="margin:0 8px;opacity:.45;">|</span> <span id="verTag" title="用于确认浏览器是否已加载最新页面">版本 v37</span></p>
   <p class="footer" style="margin-top:6px;font-size:11.5px;opacity:.85;">© 2026 王欣（Wang Xin）· 本图谱（含全部菌落照片与数据）采用 <a href="https://creativecommons.org/licenses/by-nc-nd/4.0/deed.zh" target="_blank" rel="noopener" style="color:inherit;text-decoration:underline;text-decoration-style:dashed;">CC BY-NC-ND 4.0</a> 协议许可 · 仅供教学科研参考，不作为检验依据</p>
 </div>
 
@@ -1333,7 +1369,11 @@ const CloudSync = {
         list.forEach(function (k) { cloudDirty[k] = 1; });   // 推失败 → 读取云端时跳过这些格子，保护本机改动
         return { ok: false, err: r.error.message };
       }
-      list.forEach(function (k) { delete cloudDirty[k]; });
+      list.forEach(function (k) {
+        delete cloudDirty[k];
+        if (typeof cellTouched !== 'undefined') delete cellTouched[k];   // v37：已上传，撤销保护
+      });
+      if (typeof saveTouched === 'function') saveTouched();
       return { ok: true, n: rows.length };
     } catch (e) { return { ok: false, err: String(e) }; }
   },
@@ -1508,6 +1548,23 @@ const WIPE_KEY = 'microbHeatmap.v9.wipedCells';
    被误写成红色并推上了云端。凡是名单里的格子，本机没有内容时一律不采纳云端数据
    （老版本客户端还会不断把旧记录反推回来），直到有人在网页上真给这格填了内容。 */
 const FORCE_WIPE_CELLS = { '0_0': '2026-09-15T13:00:00.000Z' };
+/* v37：本机「最后改动某格」的时刻表。
+   用途：同步时拿它和云端行的 updated_at 比 —— 本机改得更晚就不采纳云端那条，
+   否则「刚改完，30 秒后被云端旧记录读回来」的毛病永远治不好。
+   推送成功即清除，所以它只保护「改动尚未上传」的那一小段时间，不会长期挡住云端。 */
+const TOUCH_KEY = 'microbHeatmap.v9.cellTouched';
+function loadTouched() {
+  try { return JSON.parse(localStorage.getItem(TOUCH_KEY) || '{}'); } catch (e) { return {}; }
+}
+let cellTouched = loadTouched();
+function saveTouched() {
+  try { localStorage.setItem(TOUCH_KEY, JSON.stringify(cellTouched)); } catch (e) {}
+}
+function touchCell(k) {
+  cellTouched[k] = new Date().toISOString();
+  saveTouched();
+  return cellTouched[k];
+}
 function loadWipes() {
   try { return JSON.parse(localStorage.getItem(WIPE_KEY) || '{}'); } catch (e) { return {}; }
 }
@@ -1668,7 +1725,11 @@ function applyCloudCellRow(row) {
      老版本客户端（v35 及以前）本机还存着那条被误写的红色记录，会不停把它反推
      回云端；只靠「时间戳比墓碑新就认云端」挡不住它们。等本机真的给这格填了
      内容（cellHasContent 为真），这条拦截自动失效。 */
-  if (FORCE_WIPE_CELLS[k] && !cellHasContent(k)) {
+  /* v37：加了两个放行条件，避免这条规则变成「永久锁死」——
+     ① 本机刚改过（cellTouched）→ 以本机为准，不拦；
+     ② 云端这行是订正时刻之后写的（例如以后真有人把 0_0 做成生长）→ 是合法新数据，不拦。 */
+  if (FORCE_WIPE_CELLS[k] && !cellHasContent(k) && !cellTouched[k] &&
+      (Date.parse(row.updated_at || '') || 0) < Date.parse(FORCE_WIPE_CELLS[k])) {
     delete userOverrides[k]; delete userPhotos[k]; delete photoAuthors[k]; delete mediaSrcs[k];
     if (!cellWipes[k]) cellWipes[k] = FORCE_WIPE_CELLS[k];
     return false;
@@ -1687,6 +1748,16 @@ function applyCloudCellRow(row) {
     }
     return false;
   }
+  /* v37-A：本机这一格的改动比云端这条更新（改完还没推上去，或推送失败过）
+     → 不采纳云端，并标记 cloudDirty 让它重新推。这是「改完过一会又变回去」的
+     同步层根治：谁改得晚，以谁为准。推送成功后 cellTouched 自动清除。 */
+  const tch = Date.parse(cellTouched[k] || '') || 0;
+  if (tch > (Date.parse(row.updated_at || '') || 0)) {
+    cloudDirty[k] = 1;
+    return false;
+  }
+  if (tch) { delete cellTouched[k]; saveTouched(); }
+
   /* v36-B：本机登记过清空、而云端这行还是旧的（updated_at 不晚于墓碑）→ 忽略它。
      否则刚点完「改为未实验」，马上就会被云端那条旧记录覆盖回原来的颜色。
      若云端确实在本机清空之后被别人重写过（updated_at 更晚），则认云端并撤销墓碑。 */
@@ -2973,9 +3044,29 @@ function adminWriteOverride(bi, mi, status) {
   const me = currentUser();
   const prev = userOverrides[key] || {};
   if (status === 'not_tested') {
-    /* 变回灰色未实验：清除覆盖与用户补充照片。
-       v36：同时登记「清空」墓碑 —— 否则云端那条旧记录清不掉，几秒后又被读回来变红。 */
-    wipeCellLocal(key);
+    /* v37 核心修复：改为「显式未实验」，不再把覆盖记录删掉。
+       旧做法（v36 及以前）删掉覆盖后，getEffective() 会回落到**内建状态**，
+       而绝大多数格子的内建状态是彩色 → 用户看到的就是「刚点完灰，马上又变红」。
+       而且删干净之后这格从推送名单里消失，云端那条旧记录永远清不掉。
+       现在写一条明确的 status='not_tested'：本机、其他电脑、游客读到的都是灰色，
+       而且它老老实实进推送名单 —— 任何状态改动都会真正「定下来」，直到有人再改。 */
+    delete userPhotos[key];
+    delete photoAuthors[key];
+    delete mediaSrcs[key];
+    clearCellWiped(key);
+    userOverrides[key] = {
+      status: 'not_tested',
+      uploader: me ? me.name : '管理员',
+      contact:  me ? (me.email || me.contact || '') : '',
+      org:      me ? (me.org || '') : '',
+      date:     new Date().toISOString().slice(0, 10),
+      mediaSource: null,
+      photoAuthor: null,
+      photoName: null,
+      by: null,                     // 灰色不是「补充数据」，不计入会员的已通过提交统计
+      role: me ? me.role : 'admin',
+      setBy: (session && session.username) ? session.username : null   // 操作人留痕（审核记录里也有）
+    };
     savePhotos(); savePhotoAuthors(); saveMediaSrcs(); saveWipes();
   } else {
     clearCellWiped(key);        // v36：重新填写内容 → 撤销清空标记
@@ -3007,6 +3098,7 @@ function adminWriteOverride(bi, mi, status) {
   }
   delete pendingSubs[key]; savePending();   // 有会员待审提交时一并清除（管理员操作优先）
   saveWipes();
+  touchCell(key);      // v37：登记本机改动时刻 —— 在推送成功前，云端旧行不许回写本机
   saveOverrides();
   refreshCell(bi, mi);
   updateNavbar();
@@ -3446,7 +3538,7 @@ btnConfirm.addEventListener('click', async function() {
   // ---------- 不生长：无图 ----------
   if (status === 'no_growth') {
     if (isAdmin()) {
-      userOverrides[key] = submission;
+      userOverrides[key] = submission; touchCell(key);   // v37
       delete userPhotos[key];
       delete photoAuthors[key];   // v21：作者记录一并清除
       delete pendingSubs[key]; savePending();
@@ -3467,7 +3559,7 @@ btnConfirm.addEventListener('click', async function() {
   // ---------- v24：只改判定、不传新照片 ----------
   if (!theFile) {
     if (isAdmin()) {
-      userOverrides[key] = submission;
+      userOverrides[key] = submission; touchCell(key);   // v37
       saveOverrides();
       refreshCell(bi, mi);
       toast('管理员已直接修改状态（未上传新照片）', 'ok');
@@ -3508,7 +3600,7 @@ btnConfirm.addEventListener('click', async function() {
   if (isAdmin()) {
     // 管理员 / 超级管理员：直接生效（免审核）
     if (dataUrl && theFile.size <= 5 * 1024 * 1024) { setUserPhoto(bi, mi, dataUrl, submission.photoAuthor); }
-    userOverrides[key] = submission;
+    userOverrides[key] = submission; touchCell(key);   // v37
     delete pendingSubs[key]; savePending();
     saveOverrides();
     refreshCell(bi, mi);
@@ -3551,7 +3643,9 @@ function refreshCell(bi, mi) {
   td.classList.toggle('clickable', hasPhoto || isEditable || isPending || isAdmin());
   td.classList.toggle('has-pending', isPending);
   td.title = userOverrides[key]
-    ? ('已由 ' + userOverrides[key].uploader + ' 于 ' + userOverrides[key].date + ' 补充')
+    ? (userOverrides[key].status === 'not_tested'
+        ? ('已标记为「未实验」 · ' + userOverrides[key].date)
+        : ('已由 ' + userOverrides[key].uploader + ' 于 ' + userOverrides[key].date + ' 补充'))
     : (isPending ? '有待审核提交' : '');
 }
 
@@ -4429,6 +4523,7 @@ document.getElementById('reviewList').addEventListener('click', async function(e
       else setUserPhoto(bi, mi, pd.photoDataUrl, pd.photoAuthor);
     }
     userOverrides[key] = { status: pd.status, uploader: pd.uploader, contact: pd.contact, org: pd.org, date: pd.date, mediaSource: pd.mediaSource || null, photoAuthor: pd.photoAuthor || null, photoName: pd.photoName, by: pd.by, role: pd.role };
+    touchCell(key);   // v37：审核通过也是「本机改动」，同样受时间戳保护
     saveOverrides();
     delete pendingSubs[key]; savePending();
     refreshCell(bi, mi);
@@ -4657,7 +4752,8 @@ bacteria.forEach(function(b, i) {
                  '<div class="tt-desc">' + eff.desc;
       if (userOverrides[key]) {
         const ov = userOverrides[key];
-        html += '<br>👤 ' + escapeHTML(ov.uploader) + ' · ' + ov.date;
+        html += '<br>👤 ' + escapeHTML(ov.uploader) + ' · ' + ov.date +
+                (ov.status === 'not_tested' ? '（标记为未实验）' : '');
         if (ov.org) html += '<br>🏢 ' + escapeHTML(ov.org);
       }
       if (isPending) {
