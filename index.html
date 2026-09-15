@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 
+
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -1486,13 +1487,68 @@ let cloudSyncing   = false;   // 防止并发同步
 let cloudLastSync  = 0;
 let cloudProfilePushed = false;
 
-/* 有本地记录的格子 key（overrides/photos/authors/mediaSrc/hidden 共用同一套 key） */
+/* ============================================================================
+   v36：格子「清空」墓碑（wipedCells）—— 让「改为未实验」也能同步到云端
+   ----------------------------------------------------------------------------
+   问题（2026-09-15 用户报）：超管把 0_0（鼠伤寒沙门氏菌 × 麦康凯平板）改回「未实验」，
+   本机确实变灰了，但几秒后又变回红色。原因有两层：
+     1) pushCells() 推的是 cellAllKeys()，而它只收集「本机还有记录的格子」。
+        清空之后这一格什么都不剩，于是**根本不在推送名单里** → 云端 atlas_cells
+        那一行仍留着旧的 ov(status=no_growth) → 下一次同步又被读回来覆盖本机。
+     2) 云端「已经有这一行」，所以 cloudSyncAll 的 localOnly 补推逻辑（只推云端
+        没有的格子）也管不到它。于是清空动作永远传不出去。
+   做法：给「已清空」的格子登记一个墓碑时间戳。
+     · cellAllKeys() 把墓碑格一起算进来 → 它始终在推送名单里；
+     · cellPayload() 在该格确实没有内容时带上 wipedAt → 云端那行被写成「空壳」；
+     · 各端读到 wipedAt 就按时间戳清掉本机残留（谁更新以谁为准）。
+   清空后若有人又给该格填了内容，payload 不再带 wipedAt，会自动解除。
+   ============================================================================ */
+const WIPE_KEY = 'microbHeatmap.v9.wipedCells';
+/* 硬性清空名单：这些格子的内建数据本来就是「未实验（灰色）」，2026-09-15 联调时
+   被误写成红色并推上了云端。凡是名单里的格子，本机没有内容时一律不采纳云端数据
+   （老版本客户端还会不断把旧记录反推回来），直到有人在网页上真给这格填了内容。 */
+const FORCE_WIPE_CELLS = { '0_0': '2026-09-15T13:00:00.000Z' };
+function loadWipes() {
+  try { return JSON.parse(localStorage.getItem(WIPE_KEY) || '{}'); } catch (e) { return {}; }
+}
+let cellWipes = loadWipes();     // { "bi_mi": ISO 时间串 ── 最后一次清空的时刻 }
+function saveWipes() {
+  try { localStorage.setItem(WIPE_KEY, JSON.stringify(cellWipes)); } catch (e) {}
+}
+function markCellWiped(k, iso) {
+  cellWipes[k] = iso || new Date().toISOString();
+  return cellWipes[k];
+}
+function clearCellWiped(k) {
+  if (!cellWipes[k]) return false;
+  delete cellWipes[k];
+  return true;
+}
+/* 该格在本机是否还有「内容」（状态覆盖 / 补充照片 / 培养基来源） */
+function cellHasContent(k) {
+  if (userOverrides[k]) return true;
+  if (getUserPhotoList(k).length) return true;
+  if (mediaSrcs[k]) return true;
+  return false;
+}
+/* 清空某格的本机全部记录并登记墓碑（调用方负责 save*） */
+function wipeCellLocal(k) {
+  delete userOverrides[k];
+  delete userPhotos[k];
+  delete photoAuthors[k];
+  delete mediaSrcs[k];
+  markCellWiped(k);
+}
+
+/* 有本地记录的格子 key（overrides/photos/authors/mediaSrc/hidden 共用同一套 key）
+   v36：墓碑格也要算进来 —— 它们本机已经没有内容，但「清空」这件事必须推给云端。 */
 function cellAllKeys() {
   const set = {};
   [userOverrides, userPhotos, photoAuthors, mediaSrcs, hiddenPhotos].forEach(function (m) {
     if (!m) return;
     Object.keys(m).forEach(function (k) { set[k] = 1; });
   });
+  Object.keys(cellWipes).forEach(function (k) { set[k] = 1; });   // v36
   return Object.keys(set);
 }
 
@@ -1509,7 +1565,10 @@ function cellPayload(k) {
     photos: photos,
     authors: Array.isArray(au) ? au.slice() : (au ? [au] : []),
     mediaSrc: mediaSrcs[k] || null,
-    hidden: Array.isArray(hiddenPhotos[k]) ? hiddenPhotos[k].slice() : []
+    hidden: Array.isArray(hiddenPhotos[k]) ? hiddenPhotos[k].slice() : [],
+    /* v36：本机确实清空了这一格（且之后没人再填内容）→ 告诉云端「这行是空壳」，
+       各端据此一起把本机残留清掉。有内容时为 null，等于自动解除清空标记。 */
+    wipedAt: (cellWipes[k] && !cellHasContent(k)) ? cellWipes[k] : null
   };
 }
 
@@ -1583,7 +1642,10 @@ function purgeRemovedPhotos() {
     } else {
       delete userPhotos[k];
       delete photoAuthors[k];
-      if (ovFromRemovedPhoto(userOverrides[k])) { delete userOverrides[k]; delete mediaSrcs[k]; }
+      if (ovFromRemovedPhoto(userOverrides[k])) {
+        delete userOverrides[k]; delete mediaSrcs[k];
+        markCellWiped(k);   // v36：同样要登记墓碑，否则云端那条旧记录会把它推回来
+      }
     }
   });
   if (touched) {
@@ -1601,6 +1663,39 @@ function applyCloudCellRow(row) {
   const k = (row && row.cell_key) || '';
   if (!k) return false;
   const p = row.payload || {};
+
+  /* v36-C：硬性清空名单 —— 这些格子本机没有内容时，任何云端内容都不采纳。
+     老版本客户端（v35 及以前）本机还存着那条被误写的红色记录，会不停把它反推
+     回云端；只靠「时间戳比墓碑新就认云端」挡不住它们。等本机真的给这格填了
+     内容（cellHasContent 为真），这条拦截自动失效。 */
+  if (FORCE_WIPE_CELLS[k] && !cellHasContent(k)) {
+    delete userOverrides[k]; delete userPhotos[k]; delete photoAuthors[k]; delete mediaSrcs[k];
+    if (!cellWipes[k]) cellWipes[k] = FORCE_WIPE_CELLS[k];
+    return false;
+  }
+
+  /* v36-A：云端这一行是「已清空」的空壳 → 据时间戳清掉本机残留。
+     若本机的清空比云端这条更晚，则保留本机（本机改动还没推上去）。 */
+  if (p.wipedAt) {
+    const wt = Date.parse(p.wipedAt) || 0;
+    const lt = Date.parse(cellWipes[k] || '') || 0;
+    if (wt >= lt) {
+      delete userOverrides[k]; delete userPhotos[k]; delete photoAuthors[k]; delete mediaSrcs[k];
+      if (Array.isArray(p.hidden) && p.hidden.length) hiddenPhotos[k] = p.hidden.slice(); else delete hiddenPhotos[k];
+      cellWipes[k] = p.wipedAt;
+      return true;
+    }
+    return false;
+  }
+  /* v36-B：本机登记过清空、而云端这行还是旧的（updated_at 不晚于墓碑）→ 忽略它。
+     否则刚点完「改为未实验」，马上就会被云端那条旧记录覆盖回原来的颜色。
+     若云端确实在本机清空之后被别人重写过（updated_at 更晚），则认云端并撤销墓碑。 */
+  if (cellWipes[k] && !cellHasContent(k)) {
+    const lt = Date.parse(cellWipes[k]) || 0;
+    const ut = Date.parse(row.updated_at || '') || 0;
+    if (ut <= lt) return false;
+    delete cellWipes[k];
+  }
 
   /* v33：云端 payload 里若还带着已下架照片（Storage 已删、CDN 仍在缓存），
      先按同序把照片与作者一起剔掉；剔完该格再无内容时，连补充记录一并撤掉。 */
@@ -1980,10 +2075,24 @@ async function cloudSyncAll(opts) {
         const pr = await CloudSync.pushCells(localOnly);
         out.pushed = pr.ok ? localOnly.length : 0;
       }
+      /* v36：本机「已清空」的格子（含硬性清空名单）必须每轮都推一次 ——
+         云端那行已经存在，只推「本机独有」的格子永远覆盖不到它，清空动作就传不出去；
+         而且老版本客户端会把旧记录反推回来，必须每轮压一遍。 */
+      const wipeKeys = [];
+      Object.keys(cellWipes).concat(Object.keys(FORCE_WIPE_CELLS)).forEach(function (k) {
+        if (wipeKeys.indexOf(k) < 0 && !cellHasContent(k)) wipeKeys.push(k);
+      });
+      if (wipeKeys.length) {
+        const wr = await CloudSync.pushCells(wipeKeys);
+        if (wr.ok) out.pushed += wipeKeys.length;
+      }
+      const keepApply = applyingCloud;
       applyingCloud = true;
-      cr.rows.forEach(function (r) { if (!cloudDirty[r.cell_key] && applyCloudCellRow(r)) out.cells++; });
-      saveOverrides(); savePhotos(); savePhotoAuthors(); saveMediaSrcs(); saveHiddenPhotos();
-      applyingCloud = false;
+      try {
+        cr.rows.forEach(function (r) { if (!cloudDirty[r.cell_key] && applyCloudCellRow(r)) out.cells++; });
+        saveOverrides(); savePhotos(); savePhotoAuthors(); saveMediaSrcs(); saveHiddenPhotos();
+        saveWipes();
+      } finally { applyingCloud = keepApply; }
       refreshAllCells();
     } else { out.err = cr.err; }
 
@@ -2864,12 +2973,12 @@ function adminWriteOverride(bi, mi, status) {
   const me = currentUser();
   const prev = userOverrides[key] || {};
   if (status === 'not_tested') {
-    // 变回灰色未实验：清除覆盖与用户补充照片
-    delete userOverrides[key];
-    delete userPhotos[key];
-    delete photoAuthors[key];   // v21：作者记录一并清除
-    savePhotos(); savePhotoAuthors();
+    /* 变回灰色未实验：清除覆盖与用户补充照片。
+       v36：同时登记「清空」墓碑 —— 否则云端那条旧记录清不掉，几秒后又被读回来变红。 */
+    wipeCellLocal(key);
+    savePhotos(); savePhotoAuthors(); saveMediaSrcs(); saveWipes();
   } else {
+    clearCellWiped(key);        // v36：重新填写内容 → 撤销清空标记
     userOverrides[key] = {
       status: status,
       uploader: me ? me.name : '管理员',
@@ -2883,7 +2992,21 @@ function adminWriteOverride(bi, mi, status) {
       role: me ? me.role : 'admin'
     };
   }
+  /* v36：本机待审提交一并清除（管理员操作优先）；云端那条也标记为已处理，
+     否则超管在别的电脑上仍会看到这条待审核，审完又会把这一格改回去。 */
+  const stalePd = pendingSubs[key];
+  if (stalePd && stalePd.__cloudId && typeof CloudSync !== 'undefined' &&
+      CloudSync.ready && CloudSync.ready()) {
+    CloudSync.resolveSubmission(stalePd.__cloudId, 'rejected', {
+      cell_key:  key,
+      by:        stalePd.by || '',
+      uploader:  stalePd.uploader || '',
+      reviewNote: '该格已由管理员直接修改并生效，本条申请自动作废',
+      autoVoided: true
+    }).catch(function () {});
+  }
   delete pendingSubs[key]; savePending();   // 有会员待审提交时一并清除（管理员操作优先）
+  saveWipes();
   saveOverrides();
   refreshCell(bi, mi);
   updateNavbar();
@@ -4433,6 +4556,29 @@ updateNavbar();
   applyingCloud = true;
   try { purgeRemovedPhotos(); } catch (e) {}
   applyingCloud = false;
+})();
+
+/* ================= v36：启动时一次性订正「被误设状态」的格子 =================
+   0_0（鼠伤寒沙门氏菌 × 麦康凯平板）的内建数据本来就是「未实验（灰色）」，
+   但 2026-09-15 联调时被写成了「不生长（红色）」并推上了云端；而「清空」这个
+   动作在 v35 及以前传不出本机，于是每次同步又被云端那条旧记录覆盖回红色。
+   这里在启动时强制清一次并登记墓碑，之后由同步机制把云端那行也清成空壳。
+   名单见 FORCE_WIPE_CELLS，每格只订正一次（墓碑比订正值新就跳过）。 */
+(function applyForceWipes() {
+  let n = 0;
+  Object.keys(FORCE_WIPE_CELLS).forEach(function (k) {
+    const t = FORCE_WIPE_CELLS[k];
+    if ((Date.parse(cellWipes[k] || '') || 0) >= Date.parse(t)) return;   // 已订正过
+    delete userOverrides[k]; delete userPhotos[k]; delete photoAuthors[k]; delete mediaSrcs[k];
+    cellWipes[k] = t;
+    n++;
+  });
+  if (n) {
+    applyingCloud = true;
+    try { saveOverrides(); savePhotos(); savePhotoAuthors(); saveMediaSrcs(); saveWipes(); }
+    finally { applyingCloud = false; }
+  }
+  window.__forceWiped = n;
 })();
 
 /* ================= v32：启动云端双向同步 =================
